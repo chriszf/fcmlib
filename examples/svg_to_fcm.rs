@@ -6,39 +6,77 @@ use fcmlib::{
     svg_path::{SvgConfig, SvgPathParser},
     AlignmentData, CutData, FcmFile, FileHeader, FileType, FileVariant,
     Generator, Path, PathTool, Piece, PieceRestrictions, PieceTable, Point,
+    registration_marks::{self, PageSize},
 };
 
-/// Standard page sizes in mm
-struct PageSize {
-    width_mm: f64,
-    height_mm: f64,
+pub const INSET_X: f64 = 8.0;
+pub const INSET_Y: f64 = 9.0;
+
+use std::env;
+use std::fs;
+use std::path::Path as FilePath;
+
+fn find_cut_layer_bounds(svg: &str) -> (usize, usize)
+{
+    let group_start = svg.find(r#"id="Cut-Layer""#).
+        expect("Cut-Layer group not found");
+
+    let tag_start = svg[..group_start].rfind("<").unwrap();
+
+    // Find the end of the <g tag... but whyyy
+    let tag_end = svg[group_start..].find('>').unwrap() + group_start + 1;
+
+    let mut depth = 1usize;
+    let mut pos = tag_end;
+
+    // Loop through <g> and </g> tags until we find the matching </g> to the cut-layer group 
+    let group_end = loop {
+        let next_open = svg[pos..].find("<g").map(|i| i + pos);
+        let next_close = svg[pos..].find("</g>").map(|i| i + pos);
+
+        match (next_open, next_close) {
+            (Some(o), Some(c)) if o < c => {
+                depth += 1;
+                pos = o + 2;
+            }
+
+            (_, Some(c)) => {
+                depth -= 1;
+                if depth == 0 {
+                    break c + 4;
+                }
+
+                pos = c + 4;
+            }
+            _ => panic!("Malformed SVG: Unmatched <g> tag."),
+        }
+    };
+
+    (tag_start, group_end)
 }
 
-impl PageSize {
-    const LETTER: PageSize = PageSize { width_mm: 215.9, height_mm: 279.4 };
-    const A4: PageSize = PageSize { width_mm: 210.0, height_mm: 297.0 };
+fn extract_cut_layer(svg: &str, group_start:usize, group_end:usize) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let content = &svg[group_start..group_end];
+
+    let mut paths = Vec::new();
+    let mut search = content;
+
+    while let Some(d_pos) = search.find(r#" d=""#) {
+        let rest = &search[d_pos + 4..]; // Skip past the d=... presumably search until the last
+                                         // quote
+        if let Some(d_end) = rest.find('"') {
+            paths.push(rest[..d_end].to_string());
+        }
+        search = &search[d_pos + 4..];
+    }
+
+    Ok(paths)
 }
 
-/// Calculate registration mark positions for a given page size
-fn calculate_registration_marks(page: &PageSize) -> Vec<Point> {
-    // Standard Brother insets (approximately 12mm from edges)
-    let x_inset = 1200i32;  // 12.00mm in hundredths
-    let y_inset = 1398i32;  // 13.98mm in hundredths
-
-    let page_width = (page.width_mm * 100.0) as i32;
-    let page_height = (page.height_mm * 100.0) as i32;
-
-    vec![
-        Point { x: x_inset, y: y_inset },                              // Top-left
-        Point { x: page_width - x_inset, y: y_inset },                 // Top-right
-        Point { x: page_width - x_inset, y: page_height - y_inset },   // Bottom-right
-        Point { x: x_inset, y: page_height - y_inset },                // Bottom-left
-    ]
-}
 
 /// Convert SVG path data to a print-and-cut FCM file
 fn svg_to_print_and_cut_fcm(
-    svg_path_d: &str,
+    svg_paths: &Vec<String>,
     page: &PageSize,
     svg_dpi: f64,
 ) -> Result<FcmFile, Box<dyn std::error::Error>> {
@@ -51,7 +89,10 @@ fn svg_to_print_and_cut_fcm(
     };
 
     let parser = SvgPathParser::new(config);
-    let shapes = parser.parse(svg_path_d)?;
+    let mut shapes = Vec::new();
+    for path in svg_paths {
+        shapes.extend(parser.parse(path)?);
+    }
 
     // Calculate bounding box for piece dimensions
     let mut min_x = i32::MAX;
@@ -96,7 +137,7 @@ fn svg_to_print_and_cut_fcm(
     let paths: Vec<Path> = shapes
         .into_iter()
         .map(|shape| Path {
-            tool: PathTool::TOOL_CUT | PathTool::TOOL_DRAW,
+            tool: PathTool::TOOL_CUT,
             shape: Some(fcmlib::PathShape {
                 start: Point {
                     x: shape.start.x - center_x as i32,
@@ -177,10 +218,10 @@ fn svg_to_print_and_cut_fcm(
             mat_id: 0,
             cut_width: page_width,
             cut_height: page_height,
-            seam_allowance_width: 2000,
+            seam_allowance_width: 0,
             alignment: Some(AlignmentData {
                 needed: true,
-                marks: calculate_registration_marks(page),
+                marks: registration_marks::get_fcm_alignment_marks_inset(page, INSET_X, INSET_Y),
             }),
         },
         piece_table: PieceTable {
@@ -189,24 +230,42 @@ fn svg_to_print_and_cut_fcm(
     })
 }
 
-fn main() {
-    // Example: A star shape centered at 100,100 with 50px radius
-    let star_path = "M 100,50 L 112,85 L 150,85 L 120,105 L 132,140 L 100,120 L 68,140 L 80,105 L 50,85 L 88,85 Z";
 
-    // Example: A simple rectangle
-    let rect_path = "M 200,200 L 400,200 L 400,300 L 200,300 Z";
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args: Vec<String> = env::args().collect();
+    if args.len() < 2 {
+        eprintln!("Usage: {} <input.svg>", args[0]);
+        std::process::exit(1);
+    }
 
-    // Example: A heart shape with bezier curves
-    let heart_path = "M 300,250 C 300,200 250,200 250,250 C 250,280 300,320 300,320 C 300,320 350,280 350,250 C 350,200 300,200 300,250 Z";
+    let input_path = &args[1];
+    let input_stem = FilePath::new(input_path)
+        .file_stem()
+        .unwrap()
+        .to_str()
+        .unwrap();
+
+    let svg_content = fs::read_to_string(input_path)?;
+    
+    let page_size = &PageSize::LETTER_LANDSCAPE;
+    let dpi = 300.0;
+
+    // Extract paths from Cut-Layer somehow...???.
+    let (group_start, group_end) = find_cut_layer_bounds(&svg_content);
+    let paths = extract_cut_layer(&svg_content, group_start, group_end)?;
+
+    let print_svg = format!("{}{}{}", &svg_content[..group_start],
+            registration_marks::generate_embeddable_marks_inset_svg(page_size, Some(dpi), INSET_X, INSET_Y),
+            &svg_content[group_end..]);
+
+    // Extract everything but the cut layer.
 
     println!("=== SVG to Print-and-Cut FCM Converter ===\n");
-
-    // Convert rectangle (simplest case)
-    println!("Converting rectangle...");
-    match svg_to_print_and_cut_fcm(rect_path, &PageSize::LETTER, 96.0) {
+    println!("Converting all paths...");
+    let output = format!("{}.fcm", input_stem);
+    match svg_to_print_and_cut_fcm(&paths, page_size, dpi) {
         Ok(fcm) => {
-            let output = "rectangle_print_and_cut.fcm";
-            fcm.to_file(output).expect("Failed to write FCM");
+            fcm.to_file(&output).expect("Failed to write FCM");
             println!("  Created: {}", output);
             println!("  Page: {}mm x {}mm",
                 fcm.cut_data.cut_width as f64 / 100.0,
@@ -218,36 +277,11 @@ fn main() {
         Err(e) => println!("  Error: {}", e),
     }
 
-    // Convert star
-    println!("\nConverting star...");
-    match svg_to_print_and_cut_fcm(star_path, &PageSize::LETTER, 96.0) {
-        Ok(fcm) => {
-            let output = "star_print_and_cut.fcm";
-            fcm.to_file(output).expect("Failed to write FCM");
-            println!("  Created: {}", output);
-        }
-        Err(e) => println!("  Error: {}", e),
-    }
+    let print_path = format!("{}_print.svg", input_stem);
+    fs::write(&print_path, &print_svg)?;
 
-    // Convert heart (with bezier curves)
-    println!("\nConverting heart (bezier curves)...");
-    match svg_to_print_and_cut_fcm(heart_path, &PageSize::LETTER, 96.0) {
-        Ok(fcm) => {
-            let output = "heart_print_and_cut.fcm";
-            fcm.to_file(output).expect("Failed to write FCM");
-            println!("  Created: {}", output);
-
-            // Show piece info
-            if let Some((_, piece)) = fcm.piece_table.pieces.first() {
-                println!("  Shape size: {:.2}mm x {:.2}mm",
-                    piece.width as f64 / 100.0,
-                    piece.height as f64 / 100.0);
-            }
-        }
-        Err(e) => println!("  Error: {}", e),
-    }
-
-    println!("\n=== Done! ===");
     println!("\nFiles created can be loaded on a Brother ScanNCut.");
     println!("Remember to print the artwork with registration marks first!");
+
+    Ok(())
 }

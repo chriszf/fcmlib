@@ -263,7 +263,7 @@ fn generate_print_svg(original_svg: &str, page: &PageSize) -> Result<String, Box
     marks_svg.push_str("  <g id=\"registration_marks\">\n");
     for (i, mark) in marks.iter().enumerate() {
         let (x, y) = mark.to_svg_coords(72.0);
-        marks_svg.push_str(&registration_marks::generate_mark_svg(x, y, &format!("R{}", i + 1)));
+        marks_svg.push_str(&registration_marks::generate_mark_svg(x, y, &format!("R{}", i + 1), 72.0));
         marks_svg.push('\n');
     }
     marks_svg.push_str("  </g>\n");

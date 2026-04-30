@@ -28,6 +28,9 @@
 //! - X inset: 12.0mm from left/right edges
 //! - Y inset: ~14.0mm from top/bottom edges (13.98mm exactly)
 //! - Marks are centered at these inset positions
+//!
+//! After experimentation, inset does not seem to actually matter,
+//! the machine scales to match the registration marks.
 
 use crate::Point;
 
@@ -70,8 +73,10 @@ pub struct PageSize {
 impl PageSize {
     /// US Letter: 8.5" × 11"
     pub const LETTER: PageSize = PageSize { width_mm: 215.9, height_mm: 279.4 };
+    pub const LETTER_LANDSCAPE: PageSize = PageSize { width_mm: 279.4, height_mm: 215.9 };
     /// ISO A4: 210mm × 297mm
     pub const A4: PageSize = PageSize { width_mm: 210.0, height_mm: 297.0 };
+    pub const A4_LANDSCAPE: PageSize = PageSize { width_mm: 297.0, height_mm: 210.0 };
     /// 12" × 12" craft mat
     pub const SQUARE_12: PageSize = PageSize { width_mm: 304.8, height_mm: 304.8 };
     /// 12" × 24" craft mat
@@ -113,37 +118,48 @@ impl MarkPosition {
     }
 }
 
-/// Calculate the 4 registration mark positions for a given page size
-pub fn calculate_mark_positions(page: &PageSize) -> [MarkPosition; 4] {
-    use dimensions::*;
-
+pub fn calculate_mark_positions_with_inset(page: &PageSize, x_inset_mm: f64, y_inset_mm: f64) -> [MarkPosition; 4] {
     [
         // Top-left
         MarkPosition {
-            x_mm: X_INSET_MM,
-            y_mm: Y_INSET_MM,
+            x_mm: x_inset_mm,
+            y_mm: y_inset_mm,
         },
         // Top-right
         MarkPosition {
-            x_mm: page.width_mm - X_INSET_MM,
-            y_mm: Y_INSET_MM,
+            x_mm: page.width_mm - x_inset_mm,
+            y_mm: y_inset_mm,
         },
         // Bottom-right
         MarkPosition {
-            x_mm: page.width_mm - X_INSET_MM,
-            y_mm: page.height_mm - Y_INSET_MM,
+            x_mm: page.width_mm - x_inset_mm,
+            y_mm: page.height_mm - y_inset_mm,
         },
         // Bottom-left
         MarkPosition {
-            x_mm: X_INSET_MM,
-            y_mm: page.height_mm - Y_INSET_MM,
+            x_mm: x_inset_mm,
+            y_mm: page.height_mm - y_inset_mm,
         },
     ]
+}
+
+/// Calculate the 4 registration mark positions for a given page size
+pub fn calculate_mark_positions(page: &PageSize) -> [MarkPosition; 4] {
+    use dimensions::*;
+    calculate_mark_positions_with_inset(page, X_INSET_MM, Y_INSET_MM)
 }
 
 /// Get FCM AlignmentData marks for a page size
 pub fn get_fcm_alignment_marks(page: &PageSize) -> Vec<Point> {
     calculate_mark_positions(page)
+        .iter()
+        .map(|pos| pos.to_fcm_point())
+        .collect()
+}
+
+/// Get FCM AlignmentData marks for a page size
+pub fn get_fcm_alignment_marks_inset(page: &PageSize, x_inset: f64, y_inset: f64) -> Vec<Point> {
+    calculate_mark_positions_with_inset(page, x_inset, y_inset)
         .iter()
         .map(|pos| pos.to_fcm_point())
         .collect()
@@ -163,30 +179,52 @@ const TEMPLATE_CENTER_Y: f64 = 39.63858;
 
 /// Generate a single registration mark as SVG at the given center position.
 /// Uses the exact mark from Adobe Illustrator, positioned via transform.
-pub fn generate_mark_svg(cx: f64, cy: f64, id: &str) -> String {
-    let tx = cx - TEMPLATE_CENTER_X;
-    let ty = cy - TEMPLATE_CENTER_Y;
+pub fn generate_mark_svg(cx: f64, cy: f64, id: &str, dpi: f64) -> String {
+    // The mark svg is written in 72dpi probably, we need to rescale it possibly
+    let dpi_scale = dpi / 72.0;
 
     format!(
-        "  <g id=\"{}\" transform=\"translate({:.5}, {:.5})\">\n      {}\n  </g>",
-        id, tx, ty, MARK_TEMPLATE
+        "  <g id=\"{}\" transform=\"translate({:.5}, {:.5}) scale({:.5}) translate({:.5}, {:.5})\">\n      {}\n  </g>",
+        id, cx, cy, dpi_scale, -TEMPLATE_CENTER_X, -TEMPLATE_CENTER_Y, MARK_TEMPLATE
     )
 }
 
+
+pub fn generate_embeddable_marks_inset_svg(page: &PageSize, dpi: Option<f64>, x_inset_mm: f64, y_inset_mm: f64) -> String {
+    let positions = calculate_mark_positions_with_inset(page, x_inset_mm, y_inset_mm);
+    let dpi = dpi.unwrap_or(300.0);
+
+    let mut marks_svg = String::new();
+    marks_svg.push_str(" <g id=\"registration_marks\">\n");
+    for (i, pos) in positions.iter().enumerate() {
+        let (x,y) = pos.to_svg_coords(dpi);
+        marks_svg.push_str(&generate_mark_svg(x,y, &format!("R{}", i+1), dpi));
+        marks_svg.push('\n');
+    }
+
+    marks_svg.push_str(" </g>\n");
+    marks_svg
+}
+pub fn generate_embeddable_marks_svg(page: &PageSize, dpi: Option<f64>) -> String {
+    use dimensions::*;
+    generate_embeddable_marks_inset_svg(page, dpi, X_INSET_MM, Y_INSET_MM) 
+}
+
 /// Generate complete SVG with all 4 registration marks for a page
-pub fn generate_registration_marks_svg(page: &PageSize) -> String {
+pub fn generate_registration_marks_svg(page: &PageSize, dpi: Option<f64>) -> String {
     let mm_to_pt = 72.0 / 25.4;
     let width_pt = page.width_mm * mm_to_pt;
     let height_pt = page.height_mm * mm_to_pt;
 
     let positions = calculate_mark_positions(page);
+    let dpi = dpi.unwrap_or(300.0);
 
     let marks: Vec<String> = positions
         .iter()
         .enumerate()
         .map(|(i, pos)| {
-            let (x, y) = pos.to_svg_coords(72.0);
-            generate_mark_svg(x, y, &format!("R{}", i + 1))
+            let (x, y) = pos.to_svg_coords(dpi);
+            generate_mark_svg(x, y, &format!("R{}", i + 1), dpi)
         })
         .collect();
 
@@ -218,7 +256,7 @@ pub fn generate_single_mark_svg() -> String {
         r#"<svg xmlns="http://www.w3.org/2000/svg" width="{size:.0}" height="{size:.0}" viewBox="0 0 {size:.0} {size:.0}">
 {mark}
 </svg>"#,
-        mark = generate_mark_svg(center, center, "mark")
+        mark = generate_mark_svg(center, center, "mark", 72.0)
     )
 }
 
