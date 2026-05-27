@@ -5,16 +5,146 @@
 use fcmlib::{
     svg_path::{SvgConfig, SvgPathParser},
     AlignmentData, CutData, FcmFile, FileHeader, FileType, FileVariant,
-    Generator, Path, PathTool, Piece, PieceRestrictions, PieceTable, Point,
+    Generator, Outline, Path, PathTool, Piece, PieceRestrictions, PieceTable, Point,
     registration_marks::{self, PageSize},
 };
 
+// For my printer, top is 9, buttom is 12
+
 pub const INSET_X: f64 = 8.0;
-pub const INSET_Y: f64 = 9.0;
+pub const INSET_Y: f64 = 10.0;
 
 use std::env;
 use std::fs;
 use std::path::Path as FilePath;
+
+/// BMP header for 88x88 monochrome image (62 bytes)
+const BMP_HEADER: &[u8] = &[
+    0x42, 0x4d,             // "BM"
+    0x5e, 0x04, 0x00, 0x00, // File size: 1118 bytes
+    0x00, 0x00, 0x00, 0x00, // Reserved
+    0x3e, 0x00, 0x00, 0x00, // Pixel data offset: 62 bytes
+    0x28, 0x00, 0x00, 0x00, // DIB header size: 40 bytes
+    0x58, 0x00, 0x00, 0x00, // Width: 88 pixels
+    0x58, 0x00, 0x00, 0x00, // Height: 88 pixels
+    0x01, 0x00,             // Color planes: 1
+    0x01, 0x00,             // Bits per pixel: 1
+    0x00, 0x00, 0x00, 0x00, // Compression: none
+    0x00, 0x00, 0x00, 0x00, // Image size (can be 0 for uncompressed)
+    0xc4, 0x0e, 0x00, 0x00, // Horizontal resolution
+    0xc4, 0x0e, 0x00, 0x00, // Vertical resolution
+    0x02, 0x00, 0x00, 0x00, // Colors in palette: 2
+    0x02, 0x00, 0x00, 0x00, // Important colors: 2
+    0x00, 0x00, 0x00, 0xff, // Palette entry 0: black (BGR + reserved)
+    0xff, 0xff, 0xff, 0xff, // Palette entry 1: white (BGR + reserved)
+];
+
+/// Generate 88x88 monochrome BMP thumbnail from path bounds.
+///
+/// Must be called with paths in their pre-centering coordinate space (i.e.
+/// before the per-piece transform offset is subtracted), and with the
+/// matching min/max bounds in that same space.
+fn generate_thumbnail(min_x: i32, min_y: i32, max_x: i32, max_y: i32, paths: &[Path]) -> Vec<u8> {
+    const SIZE: usize = 88;
+    const ROW_BYTES: usize = 12; // 88 bits = 11 bytes, padded to 12
+
+    // Start with white image (all 1s = white in 1-bit BMP)
+    let mut pixels = vec![0xFFu8; SIZE * ROW_BYTES];
+
+    let width = (max_x - min_x) as f64;
+    let height = (max_y - min_y) as f64;
+
+    if width <= 0.0 || height <= 0.0 {
+        // Return blank thumbnail
+        let mut bmp = BMP_HEADER.to_vec();
+        bmp.extend_from_slice(&pixels);
+        return bmp;
+    }
+
+    // Scale to fit in 80x80 (leaving 4px margin)
+    let scale = 80.0 / width.max(height);
+    let offset_x = (SIZE as f64 - width * scale) / 2.0;
+    let offset_y = (SIZE as f64 - height * scale) / 2.0;
+
+    // Helper to set a pixel (black)
+    let set_pixel = |pixels: &mut [u8], x: i32, y: i32| {
+        if x >= 0 && x < SIZE as i32 && y >= 0 && y < SIZE as i32 {
+            // BMP is bottom-up, so flip y
+            let row = SIZE - 1 - y as usize;
+            let col = x as usize;
+            let byte_idx = row * ROW_BYTES + col / 8;
+            let bit_idx = 7 - (col % 8);
+            pixels[byte_idx] &= !(1 << bit_idx); // Clear bit = black
+        }
+    };
+
+    // Draw line using Bresenham's algorithm
+    let draw_line = |pixels: &mut [u8], x0: i32, y0: i32, x1: i32, y1: i32| {
+        let dx = (x1 - x0).abs();
+        let dy = -(y1 - y0).abs();
+        let sx = if x0 < x1 { 1 } else { -1 };
+        let sy = if y0 < y1 { 1 } else { -1 };
+        let mut err = dx + dy;
+        let mut x = x0;
+        let mut y = y0;
+
+        loop {
+            set_pixel(pixels, x, y);
+            if x == x1 && y == y1 { break; }
+            let e2 = 2 * err;
+            if e2 >= dy {
+                err += dy;
+                x += sx;
+            }
+            if e2 <= dx {
+                err += dx;
+                y += sy;
+            }
+        }
+    };
+
+    // Transform FCM coords to thumbnail coords
+    let transform = |px: i32, py: i32| -> (i32, i32) {
+        let x = ((px - min_x) as f64 * scale + offset_x) as i32;
+        let y = ((py - min_y) as f64 * scale + offset_y) as i32;
+        (x, y)
+    };
+
+    // Draw all paths
+    for path in paths {
+        if let Some(shape) = &path.shape {
+            let (mut cur_x, mut cur_y) = transform(shape.start.x, shape.start.y);
+
+            for outline in &shape.outlines {
+                match outline {
+                    Outline::Line(segs) => {
+                        for seg in segs {
+                            let (nx, ny) = transform(seg.end.x, seg.end.y);
+                            draw_line(&mut pixels, cur_x, cur_y, nx, ny);
+                            cur_x = nx;
+                            cur_y = ny;
+                        }
+                    }
+                    Outline::Bezier(segs) => {
+                        // Approximate bezier with line segments to endpoints
+                        // (could subdivide for smoother curves)
+                        for seg in segs {
+                            let (nx, ny) = transform(seg.end.x, seg.end.y);
+                            draw_line(&mut pixels, cur_x, cur_y, nx, ny);
+                            cur_x = nx;
+                            cur_y = ny;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Combine header and pixels
+    let mut bmp = BMP_HEADER.to_vec();
+    bmp.extend_from_slice(&pixels);
+    bmp
+}
 
 fn find_cut_layer_bounds(svg: &str) -> (usize, usize)
 {
@@ -94,34 +224,49 @@ fn svg_to_print_and_cut_fcm(
         shapes.extend(parser.parse(path)?);
     }
 
-    // Calculate bounding box for piece dimensions
+    // Build paths in their original (uncentered) coordinate space first.
+    // We need them in this space to generate a thumbnail that matches the
+    // bounds we compute below; centering happens afterwards.
+    let paths: Vec<Path> = shapes
+        .into_iter()
+        .map(|shape| Path {
+            tool: PathTool::TOOL_CUT,
+            shape: Some(shape),
+            rhinestone_diameter: None,
+            rhinestones: vec![],
+        })
+        .collect();
+
+    // Calculate bounding box across every point of every path.
     let mut min_x = i32::MAX;
     let mut min_y = i32::MAX;
     let mut max_x = i32::MIN;
     let mut max_y = i32::MIN;
 
-    for shape in &shapes {
-        min_x = min_x.min(shape.start.x);
-        min_y = min_y.min(shape.start.y);
-        max_x = max_x.max(shape.start.x);
-        max_y = max_y.max(shape.start.y);
+    for path in &paths {
+        if let Some(shape) = &path.shape {
+            min_x = min_x.min(shape.start.x);
+            min_y = min_y.min(shape.start.y);
+            max_x = max_x.max(shape.start.x);
+            max_y = max_y.max(shape.start.y);
 
-        for outline in &shape.outlines {
-            match outline {
-                fcmlib::Outline::Line(segments) => {
-                    for seg in segments {
-                        min_x = min_x.min(seg.end.x);
-                        min_y = min_y.min(seg.end.y);
-                        max_x = max_x.max(seg.end.x);
-                        max_y = max_y.max(seg.end.y);
+            for outline in &shape.outlines {
+                match outline {
+                    Outline::Line(segs) => {
+                        for s in segs {
+                            min_x = min_x.min(s.end.x);
+                            min_y = min_y.min(s.end.y);
+                            max_x = max_x.max(s.end.x);
+                            max_y = max_y.max(s.end.y);
+                        }
                     }
-                }
-                fcmlib::Outline::Bezier(segments) => {
-                    for seg in segments {
-                        min_x = min_x.min(seg.end.x).min(seg.control1.x).min(seg.control2.x);
-                        min_y = min_y.min(seg.end.y).min(seg.control1.y).min(seg.control2.y);
-                        max_x = max_x.max(seg.end.x).max(seg.control1.x).max(seg.control2.x);
-                        max_y = max_y.max(seg.end.y).max(seg.control1.y).max(seg.control2.y);
+                    Outline::Bezier(segs) => {
+                        for s in segs {
+                            min_x = min_x.min(s.end.x).min(s.control1.x).min(s.control2.x);
+                            min_y = min_y.min(s.end.y).min(s.control1.y).min(s.control2.y);
+                            max_x = max_x.max(s.end.x).max(s.control1.x).max(s.control2.x);
+                            max_y = max_y.max(s.end.y).max(s.control1.y).max(s.control2.y);
+                        }
                     }
                 }
             }
@@ -133,51 +278,59 @@ fn svg_to_print_and_cut_fcm(
     let center_x = (min_x + max_x) as f32 / 2.0;
     let center_y = (min_y + max_y) as f32 / 2.0;
 
-    // Create paths from shapes
-    let paths: Vec<Path> = shapes
+    // Generate the thumbnail using the uncentered paths and bounds. This
+    // has to happen BEFORE we recenter, because the bounds we computed are
+    // in the same space as the paths.
+    let thumbnail = generate_thumbnail(min_x, min_y, max_x, max_y, &paths);
+
+    // Now recenter each path relative to the piece center for the FCM piece.
+    let centered_paths: Vec<Path> = paths
         .into_iter()
-        .map(|shape| Path {
-            tool: PathTool::TOOL_CUT,
-            shape: Some(fcmlib::PathShape {
-                start: Point {
-                    x: shape.start.x - center_x as i32,
-                    y: shape.start.y - center_y as i32,
-                },
-                outlines: shape.outlines.into_iter().map(|outline| {
-                    match outline {
-                        fcmlib::Outline::Line(segments) => {
-                            fcmlib::Outline::Line(segments.into_iter().map(|seg| {
-                                fcmlib::SegmentLine {
-                                    end: Point {
-                                        x: seg.end.x - center_x as i32,
-                                        y: seg.end.y - center_y as i32,
+        .map(|path| {
+            let shape = path.shape.expect("path built above always has a shape");
+            Path {
+                tool: path.tool,
+                shape: Some(fcmlib::PathShape {
+                    start: Point {
+                        x: shape.start.x - center_x as i32,
+                        y: shape.start.y - center_y as i32,
+                    },
+                    outlines: shape.outlines.into_iter().map(|outline| {
+                        match outline {
+                            Outline::Line(segments) => {
+                                Outline::Line(segments.into_iter().map(|seg| {
+                                    fcmlib::SegmentLine {
+                                        end: Point {
+                                            x: seg.end.x - center_x as i32,
+                                            y: seg.end.y - center_y as i32,
+                                        }
                                     }
-                                }
-                            }).collect())
+                                }).collect())
+                            }
+                            Outline::Bezier(segments) => {
+                                Outline::Bezier(segments.into_iter().map(|seg| {
+                                    fcmlib::SegmentBezier {
+                                        control1: Point {
+                                            x: seg.control1.x - center_x as i32,
+                                            y: seg.control1.y - center_y as i32,
+                                        },
+                                        control2: Point {
+                                            x: seg.control2.x - center_x as i32,
+                                            y: seg.control2.y - center_y as i32,
+                                        },
+                                        end: Point {
+                                            x: seg.end.x - center_x as i32,
+                                            y: seg.end.y - center_y as i32,
+                                        },
+                                    }
+                                }).collect())
+                            }
                         }
-                        fcmlib::Outline::Bezier(segments) => {
-                            fcmlib::Outline::Bezier(segments.into_iter().map(|seg| {
-                                fcmlib::SegmentBezier {
-                                    control1: Point {
-                                        x: seg.control1.x - center_x as i32,
-                                        y: seg.control1.y - center_y as i32,
-                                    },
-                                    control2: Point {
-                                        x: seg.control2.x - center_x as i32,
-                                        y: seg.control2.y - center_y as i32,
-                                    },
-                                    end: Point {
-                                        x: seg.end.x - center_x as i32,
-                                        y: seg.end.y - center_y as i32,
-                                    },
-                                }
-                            }).collect())
-                        }
-                    }
-                }).collect(),
-            }),
-            rhinestone_diameter: None,
-            rhinestones: vec![],
+                    }).collect(),
+                }),
+                rhinestone_diameter: path.rhinestone_diameter,
+                rhinestones: path.rhinestones,
+            }
         })
         .collect();
 
@@ -190,7 +343,7 @@ fn svg_to_print_and_cut_fcm(
         reduction_limit_value: 0,
         restriction_flags: PieceRestrictions::empty(),
         label: String::new(),
-        paths,
+        paths: centered_paths,
     };
 
     // Page dimensions in FCM units
@@ -209,7 +362,7 @@ fn svg_to_print_and_cut_fcm(
             copyright: String::new(),
             thumbnail_block_size_width: 3,
             thumbnail_block_size_height: 3,
-            thumbnail: vec![0; 9],
+            thumbnail,
             generator: Generator::App(1),
             print_to_cut: Some(true),
         },
