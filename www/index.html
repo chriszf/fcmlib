@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FCM Converter</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #f5f4f0;
+      --surface: #ffffff;
+      --border: #e0ddd6;
+      --border-hover: #c8c4bc;
+      --text: #1a1916;
+      --text-muted: #7a7871;
+      --accent: #2d6a4f;
+      --accent-light: #e8f5ee;
+      --danger: #c0392b;
+      --danger-light: #fdf0ee;
+      --radius: 10px;
+      --mono: 'Courier New', monospace;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #141412;
+        --surface: #1e1d1a;
+        --border: #2e2c28;
+        --border-hover: #46443e;
+        --text: #e8e6e0;
+        --text-muted: #7a7871;
+        --accent: #52b788;
+        --accent-light: #0d2b1e;
+        --danger: #e74c3c;
+        --danger-light: #2b1210;
+      }
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Georgia', serif;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 2rem 1rem;
+    }
+
+    .container {
+      width: 100%;
+      max-width: 520px;
+    }
+
+    header {
+      margin-bottom: 2rem;
+    }
+
+    h1 {
+      font-size: 1.5rem;
+      font-weight: normal;
+      letter-spacing: -0.01em;
+      color: var(--text);
+    }
+
+    .subtitle {
+      font-size: 0.875rem;
+      color: var(--text-muted);
+      margin-top: 0.25rem;
+      font-family: var(--mono);
+    }
+
+    /* Drop zone */
+    #drop-zone {
+      border: 1.5px dashed var(--border-hover);
+      border-radius: var(--radius);
+      background: var(--surface);
+      padding: 3rem 2rem;
+      text-align: center;
+      cursor: pointer;
+      transition: border-color 0.15s, background 0.15s;
+      user-select: none;
+    }
+
+    #drop-zone:hover,
+    #drop-zone.drag-over {
+      border-color: var(--accent);
+      background: var(--accent-light);
+    }
+
+    #drop-zone svg {
+      display: block;
+      margin: 0 auto 1rem;
+      opacity: 0.45;
+    }
+
+    #drop-zone .drop-label {
+      font-size: 1rem;
+      color: var(--text);
+    }
+
+    #drop-zone .drop-hint {
+      font-size: 0.8125rem;
+      color: var(--text-muted);
+      margin-top: 0.375rem;
+      font-family: var(--mono);
+    }
+
+    #file-input { display: none; }
+
+    /* Status */
+    #status {
+      margin-top: 1rem;
+      font-size: 0.8125rem;
+      font-family: var(--mono);
+      color: var(--text-muted);
+      min-height: 1.25rem;
+    }
+
+    #status.error { color: var(--danger); }
+    #status.ok { color: var(--accent); }
+
+    /* Outputs */
+    #output-area {
+      display: none;
+      margin-top: 1.25rem;
+      gap: 10px;
+    }
+
+    #output-area.visible {
+      display: flex;
+      flex-direction: column;
+    }
+
+    .output-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 0.875rem 1rem;
+      display: flex;
+      align-items: center;
+      gap: 0.875rem;
+    }
+
+    .output-card svg {
+      flex-shrink: 0;
+      opacity: 0.5;
+    }
+
+    .output-meta {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .output-filename {
+      font-size: 0.9375rem;
+      font-family: var(--mono);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      color: var(--text);
+    }
+
+    .output-size {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      margin-top: 0.125rem;
+      font-family: var(--mono);
+    }
+
+    .dl-btn {
+      flex-shrink: 0;
+      background: var(--accent-light);
+      color: var(--accent);
+      border: 1px solid transparent;
+      border-radius: 6px;
+      padding: 0.375rem 0.875rem;
+      font-size: 0.8125rem;
+      font-family: var(--mono);
+      cursor: pointer;
+      transition: opacity 0.1s;
+    }
+
+    .dl-btn:hover { opacity: 0.8; }
+    .dl-btn:active { opacity: 0.6; }
+
+    footer {
+      margin-top: 2rem;
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      font-family: var(--mono);
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>FCM Converter</h1>
+      <p class="subtitle">SVG with Cut-Layer → .fcm + _print.svg, in-browser</p>
+    </header>
+
+    <div id="drop-zone" role="button" tabindex="0" aria-label="Drop an SVG file or click to browse">
+      <!-- file icon -->
+      <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+        <polyline points="14 2 14 8 20 8"/>
+        <line x1="12" y1="18" x2="12" y2="12"/>
+        <polyline points="9 15 12 18 15 15"/>
+      </svg>
+      <p class="drop-label">Drop a .svg file here</p>
+      <p class="drop-hint">or click to browse</p>
+      <input type="file" id="file-input" accept=".svg,image/svg+xml">
+    </div>
+
+    <p id="status">Initialising…</p>
+
+    <div id="output-area" aria-live="polite">
+      <div class="output-card">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+          <polyline points="14 2 14 8 20 8"/>
+        </svg>
+        <div class="output-meta">
+          <div class="output-filename" id="out1-name">—</div>
+          <div class="output-size" id="out1-size"></div>
+        </div>
+        <button class="dl-btn" id="dl1">download</button>
+      </div>
+
+      <div class="output-card">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+          <polyline points="14 2 14 8 20 8"/>
+        </svg>
+        <div class="output-meta">
+          <div class="output-filename" id="out2-name">—</div>
+          <div class="output-size" id="out2-size"></div>
+        </div>
+        <button class="dl-btn" id="dl2">download</button>
+      </div>
+    </div>
+
+    <footer>runs locally &mdash; no data leaves your browser</footer>
+  </div>
+
+  <script type="module">
+    // ---------------------------------------------------------------------------
+    // CONFIGURE: update the module path to match your crate name after wasm-pack
+    // e.g. if your crate is named "fcm-web", wasm-pack generates "fcm_web.js"
+    // ---------------------------------------------------------------------------
+    const WASM_MODULE_PATH = './pkg/fcmlib.js';
+    // ---------------------------------------------------------------------------
+
+    const dropZone   = document.getElementById('drop-zone');
+    const fileInput  = document.getElementById('file-input');
+    const statusEl   = document.getElementById('status');
+    const outputArea = document.getElementById('output-area');
+    let wasmConvert = null;
+    let blobs = [null, null];
+
+    function setStatus(msg, kind = '') {
+      statusEl.textContent = msg;
+      statusEl.className = kind;
+    }
+
+    function formatBytes(n) {
+      if (n < 1024)        return `${n} B`;
+      if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+      return `${(n / (1024 * 1024)).toFixed(2)} MB`;
+    }
+
+    function triggerDownload(blob, filename) {
+      const url = URL.createObjectURL(blob);
+      Object.assign(document.createElement('a'), { href: url, download: filename }).click();
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+    }
+
+    async function initWasm() {
+      try {
+        const mod = await import(WASM_MODULE_PATH);
+        await mod.default();  // runs the #[wasm_bindgen(start)] init() fn
+        wasmConvert = mod.convert;
+        if (typeof wasmConvert !== 'function') throw new Error('"convert" not found in WASM module');
+        setStatus('Ready. Drop a file or click to browse.');
+      } catch (e) {
+        setStatus(`Could not load WASM module: ${e.message}`, 'error');
+      }
+    }
+
+    async function handleFile(file) {
+      if (!wasmConvert) { setStatus('WASM module not ready.', 'error'); return; }
+
+      setStatus(`Processing ${file.name}…`);
+      outputArea.classList.remove('visible');
+
+      try {
+        // SVG is text — read as string, not ArrayBuffer
+        const svgText = await file.text();
+
+        // convert() returns a JS Array: [Uint8Array, String]
+        // [0] = .fcm binary
+        // [1] = _print.svg string
+        const [fcmBytes, printSvg] = wasmConvert(svgText);
+
+        const stem = file.name.replace(/\.svg$/i, '');
+        blobs[0] = new Blob([fcmBytes], { type: 'application/octet-stream' });
+        blobs[1] = new Blob([printSvg], { type: 'image/svg+xml' });
+
+        document.getElementById('out1-name').textContent = `${stem}.fcm`;
+        document.getElementById('out1-size').textContent = formatBytes(blobs[0].size);
+        document.getElementById('out2-name').textContent = `${stem}_print.svg`;
+        document.getElementById('out2-size').textContent = formatBytes(blobs[1].size);
+
+        outputArea.classList.add('visible');
+        setStatus('Done.', 'ok');
+      } catch (e) {
+        setStatus(`Error: ${e.message}`, 'error');
+      }
+    }
+
+    // Download buttons
+    document.getElementById('dl1').addEventListener('click', () => {
+      if (blobs[0]) triggerDownload(blobs[0], document.getElementById('out1-name').textContent);
+    });
+    document.getElementById('dl2').addEventListener('click', () => {
+      if (blobs[1]) triggerDownload(blobs[1], document.getElementById('out2-name').textContent);
+    });
+
+    // File input
+    fileInput.addEventListener('change', e => {
+      if (e.target.files[0]) handleFile(e.target.files[0]);
+    });
+
+    // Click on drop zone
+    dropZone.addEventListener('click', () => fileInput.click());
+    dropZone.addEventListener('keydown', e => {
+      if (e.key === 'Enter' || e.key === ' ') fileInput.click();
+    });
+
+    // Drag and drop
+    dropZone.addEventListener('dragover',  e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+    dropZone.addEventListener('dragleave', ()  => dropZone.classList.remove('drag-over'));
+    dropZone.addEventListener('drop', e => {
+      e.preventDefault();
+      dropZone.classList.remove('drag-over');
+      const file = e.dataTransfer.files[0];
+      if (file) handleFile(file);
+    });
+
+    initWasm();
+  </script>
+</body>
+</html>
