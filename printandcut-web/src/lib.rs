@@ -4,6 +4,10 @@
 //! All conversion logic is self-contained here; the only external dependency
 //! is fcmlib itself.
 
+macro_rules! console_log {
+    ($($t:tt)*) => (web_sys::console::log_1(&format!($($t)*).into()))
+}
+
 use wasm_bindgen::prelude::*;
 
 use fcmlib::{
@@ -76,8 +80,12 @@ pub fn convert(svg_input: &str) -> std::result::Result<JsValue, JsError> {
 }
 
 fn convert_inner(svg_input: &str) -> Result<JsValue> {
-    let page_size = &PageSize::LETTER_LANDSCAPE;
+    // Estimate page by ratio of the page size.
+    //let page_size = &PageSize::LETTER_LANDSCAPE;
     let dpi = 300.0;
+    
+    let page_size = get_page_dimensions(svg_input);
+    console_log!("Detected page size: chosen={:?}", page_size);    
 
     let (group_start, group_end) = find_cut_layer_bounds(svg_input)?;
     let paths = extract_cut_layer(svg_input, group_start, group_end)?;
@@ -120,6 +128,83 @@ fn fcm_to_bytes(fcm: FcmFile) -> Result<Vec<u8>> {
     fcm.to_bytes()
         .map_err(|e| ConvertError(format!("Failed to serialise FCM: {e}")))
 }
+
+
+fn parse_svg_dimension(svg_tag: &str, attr: &str)  -> Option<f64> {
+    // Within the tag, match r"dim="..." and pull in the number after the quote.
+    let key = format!("{}=\"", attr,);
+    let start = svg_tag.find(&key)? + key.len();
+    let rest = &svg_tag[start..];
+    let end = rest.find('"')?;
+    let raw = &rest[..end];
+
+    let numeric: String = raw.chars()
+	.take_while(|c| c.is_ascii_digit() || *c == '.')
+	.collect();
+
+    console_log!("Found page dimension: {:?} {:?}", attr, numeric);    
+
+    numeric.parse::<f64>().ok()
+}
+
+fn parse_viewbox(svg_tag: &str) -> Option<(f64, f64)> {
+    //console_log!("Tag is {:?}", svg_tag);
+    let pat = "viewBox=\"";
+    let viewbox_start = &svg_tag.find(pat)?;
+    console_log!("Start is {:?}", viewbox_start);
+    let rest = &svg_tag[viewbox_start+pat.len()..];
+    console_log!("Rest is {:?}", rest);
+    let viewbox_end = rest.find("\"")?;
+    console_log!("End is {:?}", viewbox_end);
+    let viewbox=&rest[..viewbox_end];
+    console_log!("Raw viewbox is: {:?}", viewbox);
+
+    let parts: Vec<f64> = viewbox.split_whitespace()
+				 .filter_map(|s| s.parse().ok())
+				 .collect();
+    console_log!("Parts: {:?}", parts);
+    if parts.len() == 4 {
+	Some((parts[2], parts[3]))
+    } else {
+	None
+    }
+
+}
+
+fn get_page_dimensions(svg: &str) -> &PageSize {
+    // Search for <svg tag
+    let tag_start = svg.find(r#"<svg "#).unwrap_or(0);
+
+    let tag_end = svg[tag_start..]
+	.find(">").unwrap_or(0) + tag_start + 1;
+
+    let tag = &svg[tag_start..tag_end];
+    console_log!("Getting viewbox");
+    let (width, height) = match parse_viewbox(tag) {
+	Some(dims) => dims,
+	None => return &PageSize::LETTER,
+    };
+
+    let ratio=width/height;
+    console_log!("Detected page ratio: {:?}", ratio);    
+    if (ratio - 1.294).abs() <= 0.05 {
+	console_log!("Found landscape");
+	&PageSize::LETTER_LANDSCAPE
+    } else if (ratio - 0.773).abs() <= 0.05 {
+	console_log!("Found portrait");
+	&PageSize::LETTER
+    } else if (ratio - 1.414).abs() <= 0.05 {
+	console_log!("Found A4 landscape");
+	&PageSize::A4_LANDSCAPE
+    } else if (ratio - 0.707).abs() <= 0.05 {
+	console_log!("Found A4 portrait");
+	&PageSize::A4
+    } else {
+	console_log!("Unknown ratio, defaulting to letter portrait");
+	&PageSize::LETTER
+    }
+}
+
 
 // ---------------------------------------------------------------------------
 // SVG parsing helpers (ported from the example, panics → Results)
